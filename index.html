@@ -1,59 +1,196 @@
-function doGet() {
-    return HtmlService.createHtmlOutputFromFile('Index')
-        .setTitle('Keyword Bulk Renamer')
-        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
-}
+<!DOCTYPE html>
+<html>
 
-function searchFolders(searchTerm) {
-    if (!searchTerm || searchTerm.trim() === '') {
-        return { success: false, error: 'Enter a search term' };
-    }
-    try {
-        const query = `mimeType = 'application/vnd.google-apps.folder' and trashed = false and name contains '${searchTerm.trim()}'`;
-        const response = Drive.Files.list({
-            q: query,
-            fields: 'files(id,name)',
-            pageSize: 50,
-            supportsAllDrives: true,
-            includeItemsFromAllDrives: true
-        });
-        return { success: true, folders: response.files || [] };
-    } catch (e) {
-        return { success: false, error: e.message };
-    }
-}
-
-function getFilesInFolder(folderId) {
-    try {
-        const folder = DriveApp.getFolderById(folderId);
-        const files = folder.getFiles();
-        const list = [];
-        while (files.hasNext()) {
-            const f = files.next();
-            const name = f.getName();
-            const ext = name.includes('.') ? name.split('.').pop() : '';
-            list.push({ id: f.getId(), name: name, ext: ext });
+<head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <title>Keyword Bulk Renamer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding: 20px;
+            background: #f8f9fa;
         }
-        return { success: true, files: list, folderName: folder.getName() };
-    } catch (e) {
-        return { success: false, error: e.message };
-    }
-}
 
-function performRename(renameList) {
-    let count = 0;
-    try {
-        renameList.forEach(item => {
-            if (item.newName) {
-                const file = DriveApp.getFileById(item.id);
-                if (file.getName() !== item.newName) {
-                    file.setName(item.newName);
-                    count++;
+        .preview-table td {
+            vertical-align: middle;
+        }
+
+        .new-name {
+            font-weight: bold;
+            color: #0d6efd;
+        }
+
+        .card {
+            margin-bottom: 1.5rem;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1 class="mb-4">🔑 Keyword Bulk Renamer</h1>
+
+        <!-- Step 1: Search folders -->
+        <div class="card">
+            <div class="card-header">1. Search Folder by Name (partial match)</div>
+            <div class="card-body">
+                <div class="input-group">
+                    <input id="searchTerm" type="text" class="form-control" placeholder="e.g. Project 2026 or Photos"
+                        onkeypress="if(event.key==='Enter') searchFolders()">
+                    <button onclick="searchFolders()" class="btn btn-primary">Search Folders</button>
+                </div>
+                <small class="text-muted">Case-insensitive. Shows up to 50 matches.</small>
+            </div>
+        </div>
+
+        <!-- Folder list -->
+        <div id="folderListSection" class="card d-none">
+            <div class="card-header">2. Select Folder</div>
+            <div class="card-body">
+                <select id="folderSelect" class="form-select mb-3"></select>
+                <button onclick="loadSelectedFolder()" class="btn btn-success">Load Files from Selected Folder</button>
+            </div>
+        </div>
+
+        <!-- Folder info & keyword -->
+        <div id="mainSection" class="d-none">
+            <div class="alert alert-info" id="folderInfo"></div>
+
+            <div class="card">
+                <div class="card-header">3. Enter ONE Keyword & Choose Action</div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-4">
+                            <label class="form-label">Keyword</label>
+                            <input id="keyword" type="text" class="form-control" placeholder="Report"
+                                oninput="generatePreview()">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Action</label>
+                            <select id="mode" class="form-select" onchange="generatePreview()">
+                                <option value="prefix">Prefix (Keyword + old name)</option>
+                                <option value="suffix">Suffix (old name + Keyword)</option>
+                                <option value="standardize" selected>Standardize (Keyword_001.ext)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4 d-flex align-items-end">
+                            <button onclick="generatePreview()" class="btn btn-outline-primary w-100">Preview
+                                Changes</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Preview -->
+            <div id="previewSection" class="card d-none">
+                <div class="card-header">Preview – <span id="fileCount" class="badge bg-secondary"></span></div>
+                <div class="card-body p-0">
+                    <table class="table table-sm preview-table mb-0" id="previewTable">
+                        <thead>
+                            <tr>
+                                <th>Old Name</th>
+                                <th>New Name</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <div class="card-footer">
+                    <button onclick="applyRename()" class="btn btn-lg btn-success w-100">✅ Rename ALL Files Now</button>
+                    <small class="text-muted d-block mt-2">Only changed names will be updated. Test on a copy
+                        first!</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFiles = [];
+        let selectedFolderId = '';
+
+        function searchFolders() {
+            const term = document.getElementById('searchTerm').value.trim();
+            google.script.run
+                .withSuccessHandler(res => {
+                    if (!res.success) return alert('Error: ' + res.error);
+                    const select = document.getElementById('folderSelect');
+                    select.innerHTML = '';
+                    res.folders.forEach(f => {
+                        const opt = document.createElement('option');
+                        opt.value = f.id;
+                        opt.textContent = `${f.name} (ID: ${f.id.substring(0, 10)}...)`;
+                        select.appendChild(opt);
+                    });
+                    document.getElementById('folderListSection').classList.remove('d-none');
+                })
+                .searchFolders(term);
+        }
+
+        function loadSelectedFolder() {
+            selectedFolderId = document.getElementById('folderSelect').value;
+            if (!selectedFolderId) return;
+
+            google.script.run
+                .withSuccessHandler(res => {
+                    if (!res.success) return alert('Error: ' + res.error);
+                    currentFiles = res.files;
+                    document.getElementById('folderInfo').innerHTML = `Selected: <strong>${res.folderName}</strong> — ${currentFiles.length} files`;
+                    document.getElementById('mainSection').classList.remove('d-none');
+                    document.getElementById('previewSection').classList.remove('d-none');
+                    generatePreview();
+                })
+                .getFilesInFolder(selectedFolderId);
+        }
+
+        function generatePreview() {
+            const keyword = document.getElementById('keyword').value.trim();
+            const mode = document.getElementById('mode').value;
+            const tbody = document.querySelector('#previewTable tbody');
+            tbody.innerHTML = '';
+
+            currentFiles.forEach((file, i) => {
+                let newName = file.name;
+
+                if (mode === 'prefix' && keyword) newName = keyword + newName;
+                else if (mode === 'suffix' && keyword) newName = newName + keyword;
+                else if (mode === 'standardize' && keyword) {
+                    const num = (i + 1).toString().padStart(3, '0');
+                    newName = keyword + '_' + num + (file.ext ? '.' + file.ext : '');
                 }
-            }
-        });
-        return { success: true, renamed: count };
-    } catch (e) {
-        return { success: false, error: e.message };
-    }
-}
+
+                const row = `<tr>
+          <td>${file.name}</td>
+          <td class="new-name">${newName}</td>
+        </tr>`;
+                tbody.innerHTML += row;
+            });
+
+            document.getElementById('fileCount').textContent = currentFiles.length + ' files';
+        }
+
+        function applyRename() {
+            if (!confirm('Rename ALL files? This cannot be undone.')) return;
+
+            const tbody = document.querySelector('#previewTable tbody');
+            const rows = tbody.querySelectorAll('tr');
+            const renameList = [];
+
+            rows.forEach((row, i) => {
+                renameList.push({
+                    id: currentFiles[i].id,
+                    newName: row.cells[1].textContent
+                });
+            });
+
+            google.script.run
+                .withSuccessHandler(res => {
+                    if (res.success) alert(` Done! ${res.renamed} files renamed.`);
+                    else alert('Error: ' + res.error);
+                })
+                .performRename(renameList);
+        }
+    </script>
+</body>
+
+</html>
